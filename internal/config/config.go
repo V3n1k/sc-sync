@@ -35,7 +35,7 @@ type Config struct {
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		Username:    "v3n1k-101929212",
+		Username:    "",
 		MusicDir:    filepath.Join(home, "Music", "SoundCloud"),
 		DBPath:      filepath.Join(home, ".local", "share", "sc-sync", "state.db"),
 		AudioFormat: "mp3",

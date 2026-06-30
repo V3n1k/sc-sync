@@ -1,2 +1,5 @@
 /sc-sync
 /tmp/
+likes.json
+*.db
+*.db-journal
