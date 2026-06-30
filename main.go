@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -89,6 +90,8 @@ func runHeadless(cfg *config.Config) {
 		log.Printf("pruned %d missing tracks", n)
 	}
 
+	var totalAdded, totalRemoved int
+
 	for _, pl := range cfg.Playlists {
 		if !pl.Enabled {
 			continue
@@ -103,6 +106,59 @@ func runHeadless(cfg *config.Config) {
 		}
 
 		playlistDir := cfg.PlaylistDir(pl)
+
+		remoteIDs := make(map[string]soundcloud.Track, len(playlistData.Entries))
+		for _, t := range playlistData.Entries {
+			remoteIDs[t.ID] = t
+		}
+
+		// Phase 1: remove orphaned tracks
+		localTracks, err := database.GetPlaylistTracks(pl.ID)
+		if err != nil {
+			log.Printf("get local tracks: %v", err)
+		}
+
+		unassigned, err := database.GetUnassignedTracks()
+		if err != nil {
+			log.Printf("get unassigned tracks: %v", err)
+		}
+		for _, u := range unassigned {
+			uPath := filepath.Join(playlistDir, u.Title+ext)
+			if _, err := os.Stat(uPath); err == nil {
+				_ = database.UpdatePlaylistID(u.ID, pl.ID)
+				localTracks = append(localTracks, u)
+			}
+		}
+
+		for _, lt := range localTracks {
+			rt, inRemote := remoteIDs[lt.ID]
+			if !inRemote {
+				trackPath := filepath.Join(playlistDir, lt.Title+ext)
+				if err := os.Remove(trackPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("remove %q: %v", trackPath, err)
+				}
+				if err := database.Delete(lt.ID); err != nil {
+					log.Printf("delete db %q: %v", lt.ID, err)
+				}
+				fmt.Printf("🗑 %s\n", lt.Title)
+				totalRemoved++
+				continue
+			}
+
+			if lt.Title != rt.Title {
+				oldPath := filepath.Join(playlistDir, lt.Title+ext)
+				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("remove old %q: %v", oldPath, err)
+				}
+				_ = database.UpdateTrack(lt.ID, rt.Title, rt.URL)
+				_ = database.MarkNotDownloaded(lt.ID)
+			}
+		}
+
+		if len(playlistData.Entries) == 0 {
+			continue
+		}
+
 		for _, t := range playlistData.Entries {
 			if database.Exists(t.ID) {
 				continue
@@ -125,8 +181,22 @@ func runHeadless(cfg *config.Config) {
 			} else {
 				_ = database.MarkDownloaded(t.ID)
 				fmt.Printf("✓ %s\n", name)
+				totalAdded++
 			}
 		}
+	}
+
+	parts := []string{}
+	if totalAdded > 0 {
+		parts = append(parts, fmt.Sprintf("+%d", totalAdded))
+	}
+	if totalRemoved > 0 {
+		parts = append(parts, fmt.Sprintf("-%d", totalRemoved))
+	}
+	if len(parts) > 0 {
+		log.Printf("done: %s", strings.Join(parts, ", "))
+	} else {
+		log.Printf("done: nothing changed")
 	}
 
 	if err := playlist.Generate(cfg.MusicDir, ext); err != nil {

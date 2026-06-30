@@ -136,7 +136,9 @@ type startSyncMsg struct {
 	id  string
 }
 type syncDoneMsg struct {
-	err error
+	err     error
+	added   int
+	removed int
 }
 type errMsg struct {
 	err error
@@ -352,9 +354,19 @@ func (m model) handleSyncDone(d syncDoneMsg) tea.Model {
 	if d.err != nil {
 		m.syncStatus = fmt.Sprintf("Error: %v", d.err)
 	} else {
+		parts := []string{}
+		if d.added > 0 {
+			parts = append(parts, fmt.Sprintf("+%d", d.added))
+		}
+		if d.removed > 0 {
+			parts = append(parts, fmt.Sprintf("-%d", d.removed))
+		}
 		errCount := len(m.errors)
 		if errCount > 0 {
-			m.syncStatus = fmt.Sprintf("Complete — %d %s", errCount, plural(errCount, "error", "errors"))
+			parts = append(parts, fmt.Sprintf("%d %s", errCount, plural(errCount, "error", "errors")))
+		}
+		if len(parts) > 0 {
+			m.syncStatus = fmt.Sprintf("Complete — %s", strings.Join(parts, ", "))
 		} else {
 			m.syncStatus = "Complete"
 		}
@@ -791,12 +803,14 @@ func runSync(cfg *config.Config, msg startSyncMsg, ctx context.Context, cancel c
 
 	if syncErr != nil && syncErr != context.Canceled {
 		if program != nil {
-			program.Send(syncDoneMsg{err: syncErr})
+			added, removed, _ := syncer.Stats()
+			program.Send(syncDoneMsg{err: syncErr, added: added, removed: removed})
 		}
 		return
 	}
 
 	if program != nil {
-		program.Send(syncDoneMsg{})
+		added, removed, _ := syncer.Stats()
+		program.Send(syncDoneMsg{added: added, removed: removed})
 	}
 }

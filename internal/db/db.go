@@ -9,6 +9,14 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type Track struct {
+	ID         string
+	PlaylistID string
+	Title      string
+	URL        string
+	Downloaded bool
+}
+
 type DB struct {
 	conn *sql.DB
 }
@@ -110,6 +118,9 @@ func (db *DB) Prune(musicDir, audioExt string) (int, error) {
 
 	removed := 0
 	for _, t := range tracks {
+		if t.PlaylistID == "" {
+			continue
+		}
 		playlistDir := filepath.Join(musicDir, t.PlaylistID)
 		trackPath := filepath.Join(playlistDir, t.Title+audioExt)
 
@@ -122,6 +133,61 @@ func (db *DB) Prune(musicDir, audioExt string) (int, error) {
 	}
 
 	return removed, nil
+}
+
+func (db *DB) GetPlaylistTracks(playlistID string) ([]Track, error) {
+	rows, err := db.conn.Query(`SELECT id, playlist_id, title, url, downloaded FROM tracks WHERE playlist_id = ?`, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tracks []Track
+	for rows.Next() {
+		var t Track
+		if err := rows.Scan(&t.ID, &t.PlaylistID, &t.Title, &t.URL, &t.Downloaded); err != nil {
+			return nil, err
+		}
+		tracks = append(tracks, t)
+	}
+	return tracks, nil
+}
+
+func (db *DB) GetUnassignedTracks() ([]Track, error) {
+	rows, err := db.conn.Query(`SELECT id, playlist_id, title, url, downloaded FROM tracks WHERE playlist_id = ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tracks []Track
+	for rows.Next() {
+		var t Track
+		if err := rows.Scan(&t.ID, &t.PlaylistID, &t.Title, &t.URL, &t.Downloaded); err != nil {
+			return nil, err
+		}
+		tracks = append(tracks, t)
+	}
+	return tracks, nil
+}
+
+func (db *DB) UpdateTrack(id, title, url string) error {
+	_, err := db.conn.Exec(`UPDATE tracks SET title = ?, url = ? WHERE id = ?`, title, url, id)
+	return err
+}
+
+func (db *DB) UpdatePlaylistID(id, playlistID string) error {
+	_, err := db.conn.Exec(`UPDATE tracks SET playlist_id = ? WHERE id = ?`, playlistID, id)
+	return err
+}
+
+func (db *DB) TrackExists(playlistID, title string) bool {
+	var count int
+	db.conn.QueryRow(
+		`SELECT COUNT(*) FROM tracks WHERE playlist_id = ? AND title = ? AND downloaded = 1`,
+		playlistID, title,
+	).Scan(&count)
+	return count > 0
 }
 
 func (db *DB) Close() error {
