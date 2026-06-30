@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/v3n1k/sc-sync/internal/config"
-	"github.com/v3n1k/sc-sync/internal/db"
-	"github.com/v3n1k/sc-sync/internal/soundcloud"
+	"github.com/V3n1k/sc-sync/internal/config"
+	"github.com/V3n1k/sc-sync/internal/db"
+	"github.com/V3n1k/sc-sync/internal/soundcloud"
 )
 
 type TrackUpdate struct {
