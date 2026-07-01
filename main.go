@@ -99,7 +99,7 @@ func runHeadless(cfg *config.Config) {
 		log.Printf("syncing %s (%s)...", pl.Name, pl.ID)
 
 		playlistURL := cfg.PlaylistURL(pl)
-		playlistData, err := soundcloud.GetLikes(playlistURL)
+		playlistData, err := soundcloud.GetLikes(playlistURL, cfg.ProxyURL)
 		if err != nil {
 			log.Printf("error fetching %s: %v", pl.ID, err)
 			continue
@@ -175,7 +175,7 @@ func runHeadless(cfg *config.Config) {
 			fmt.Printf("⬇ %s\n", name)
 			_ = database.Save(t.ID, pl.ID, t.Title, t.URL)
 
-			if err := soundcloud.DownloadTrack(t.URL, playlistDir, cfg.AudioFormat); err != nil {
+			if err := soundcloud.DownloadTrack(t.URL, playlistDir, cfg.AudioFormat, cfg.ProxyURL); err != nil {
 				fmt.Printf("✗ %s: %v\n", name, err)
 				_ = database.MarkNotDownloaded(t.ID)
 			} else {

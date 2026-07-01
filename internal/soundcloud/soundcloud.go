@@ -20,14 +20,18 @@ type Playlist struct {
 	Entries []Track `json:"entries"`
 }
 
-func GetLikes(url string) (Playlist, error) {
-	cmd := exec.Command(
-		"yt-dlp",
+func GetLikes(url, proxyURL string) (Playlist, error) {
+	args := []string{
 		"--no-update",
 		"--flat-playlist",
 		"--dump-single-json",
-		url,
-	)
+	}
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
+	args = append(args, url)
+
+	cmd := exec.Command("yt-dlp", args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -58,7 +62,7 @@ func GetLikes(url string) (Playlist, error) {
 	return playlist, nil
 }
 
-func DownloadTrack(url string, dir string, format string) error {
+func DownloadTrack(url, dir, format, proxyURL string) error {
 	err := os.MkdirAll(dir, 0755)
 	if err != nil {
 		return err
@@ -66,16 +70,20 @@ func DownloadTrack(url string, dir string, format string) error {
 
 	outputTemplate := filepath.Join(dir, "%(title)s.%(ext)s")
 
-	cmd := exec.Command(
-		"yt-dlp",
+	args := []string{
 		"-x",
 		"--audio-format", format,
 		"-o", outputTemplate,
 		"--no-progress",
 		"--embed-thumbnail",
 		"--add-metadata",
-		url,
-	)
+	}
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
+	args = append(args, url)
+
+	cmd := exec.Command("yt-dlp", args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

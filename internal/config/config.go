@@ -29,6 +29,7 @@ type Config struct {
 	DBPath      string     `json:"db_path"`
 	AudioFormat string     `json:"audio_format"`
 	Concurrency int        `json:"concurrency"`
+	ProxyURL    string     `json:"proxy_url"`
 	Playlists   []Playlist `json:"playlists"`
 }
 

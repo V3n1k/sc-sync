@@ -16,6 +16,7 @@ import (
 
 type TrackUpdate struct {
 	PlaylistID string
+	TrackID    string
 	Title      string
 	URL        string
 	Progress   float64
@@ -137,7 +138,7 @@ func (s *Syncer) SyncPlaylist(ctx context.Context, playlist config.Playlist, upd
 
 	statusCh <- StatusMsg{PlaylistID: playlist.ID, Message: "Fetching playlist..."}
 
-	playlistData, err := soundcloud.GetLikes(playlistURL)
+	playlistData, err := soundcloud.GetLikes(playlistURL, s.cfg.ProxyURL)
 	if err != nil {
 		return fmt.Errorf("get playlist %q: %w", playlist.ID, err)
 	}
@@ -188,6 +189,7 @@ func (s *Syncer) SyncPlaylist(ctx context.Context, playlist config.Playlist, upd
 			s.stats.mu.Unlock()
 			updates <- TrackUpdate{
 				PlaylistID: playlist.ID,
+				TrackID:    lt.ID,
 				Title:      lt.Title,
 				URL:        lt.URL,
 				Progress:   1.0,
@@ -239,6 +241,7 @@ func (s *Syncer) SyncPlaylist(ctx context.Context, playlist config.Playlist, upd
 			s.stats.skipped++
 			updates <- TrackUpdate{
 				PlaylistID: playlist.ID,
+				TrackID:    t.ID,
 				Title:      t.Title,
 				URL:        t.URL,
 				Progress:   1.0,
@@ -254,6 +257,75 @@ func (s *Syncer) SyncPlaylist(ctx context.Context, playlist config.Playlist, upd
 
 	close(jobs)
 	wg.Wait()
+
+	return nil
+}
+
+type RetryTrack struct {
+	ID    string
+	Title string
+	URL   string
+}
+
+func (s *Syncer) RetryTracks(ctx context.Context, playlist config.Playlist, tracks []RetryTrack, proxyURL string, updates chan<- TrackUpdate, statusCh chan<- StatusMsg) error {
+	playlistDir := s.cfg.PlaylistDir(playlist)
+
+	statusCh <- StatusMsg{PlaylistID: playlist.ID, Message: fmt.Sprintf("Retrying %d tracks through proxy...", len(tracks))}
+
+	for i, t := range tracks {
+		if err := ctx.Err(); err != nil {
+			return ctx.Err()
+		}
+
+		updates <- TrackUpdate{
+			PlaylistID: playlist.ID,
+			Title:      t.Title,
+			URL:        t.URL,
+			Progress:   0,
+			Status:     Downloading,
+			Total:      len(tracks),
+			Current:    i + 1,
+		}
+
+		_ = s.db.Save(t.ID, playlist.ID, t.Title, t.URL)
+
+		err := soundcloud.DownloadTrack(t.URL, playlistDir, s.cfg.AudioFormat, proxyURL)
+
+		if err == nil {
+			_ = s.db.MarkDownloaded(t.ID)
+			s.stats.mu.Lock()
+			s.stats.done++
+			s.stats.mu.Unlock()
+		} else {
+			_ = s.db.MarkNotDownloaded(t.ID)
+			s.stats.mu.Lock()
+			s.stats.errors++
+			s.stats.mu.Unlock()
+		}
+
+		status := Done
+		errMsg := ""
+		if err != nil {
+			status = Error
+			errMsg = err.Error()
+		}
+
+		updates <- TrackUpdate{
+			PlaylistID: playlist.ID,
+			Title:      t.Title,
+			URL:        t.URL,
+			Progress:   1.0,
+			Status:     status,
+			Err:        errMsg,
+			Total:      len(tracks),
+			Current:    i + 1,
+		}
+
+		statusCh <- StatusMsg{
+			PlaylistID: playlist.ID,
+			Message:    fmt.Sprintf("Retry %d/%d", i+1, len(tracks)),
+		}
+	}
 
 	return nil
 }
@@ -284,7 +356,7 @@ func (s *Syncer) downloadWorker(ctx context.Context, playlist config.Playlist, d
 
 		_ = s.db.Save(t.ID, playlist.ID, t.Title, t.URL)
 
-		err := soundcloud.DownloadTrack(t.URL, dir, s.cfg.AudioFormat)
+		err := soundcloud.DownloadTrack(t.URL, dir, s.cfg.AudioFormat, s.cfg.ProxyURL)
 
 		s.stats.mu.Lock()
 		if err == nil {

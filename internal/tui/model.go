@@ -22,17 +22,20 @@ type page int
 const (
 	homePage page = iota
 	syncPage
+	failPage
 	addPage
 	deletePage
 	settingsPage
 )
 
 type syncTrack struct {
-	title    string
-	url      string
-	status   sync.Status
-	progress float64
-	err      string
+	playlistID string
+	trackID    string
+	title      string
+	url        string
+	status     sync.Status
+	progress   float64
+	err        string
 }
 
 type model struct {
@@ -67,6 +70,12 @@ type model struct {
 	settingsEditing bool
 	settingsInput   string
 	settingsMsg     string
+
+	// fail page (geo-error retry)
+	proxyInputMode bool
+	proxyInput     string
+	retryAdded     int
+	retryErrors    int
 }
 
 type tickMsg struct{}
@@ -118,6 +127,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case syncDoneMsg:
 		return m.handleSyncDone(msg), nil
+	case retryDoneMsg:
+		return m.handleRetryDone(msg), nil
 	case errMsg:
 		m.syncStatus = fmt.Sprintf("Error: %v", msg.err)
 		return m, nil
@@ -140,6 +151,10 @@ type syncDoneMsg struct {
 	added   int
 	removed int
 }
+type retryDoneMsg struct {
+	added  int
+	errors int
+}
 type errMsg struct {
 	err error
 }
@@ -150,6 +165,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHomeKey(msg)
 	case syncPage:
 		return m.handleSyncKey(msg)
+	case failPage:
+		return m.handleFailKey(msg)
 	case addPage:
 		return m.handleAddKey(msg)
 	case deletePage:
@@ -317,6 +334,64 @@ func (m model) handleSyncKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleFailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.proxyInputMode {
+		switch msg.String() {
+		case "enter":
+			val := strings.TrimSpace(m.proxyInput)
+			m.cfg.ProxyURL = val
+			m.cfg.Save()
+			m.proxyInputMode = false
+			return m.startRetry(), nil
+		case "esc", "q":
+			m.proxyInputMode = false
+			m.proxyInput = ""
+			return m, nil
+		case "backspace":
+			if len(m.proxyInput) > 0 {
+				m.proxyInput = m.proxyInput[:len(m.proxyInput)-1]
+			}
+			return m, nil
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.proxyInput += msg.String()
+			}
+			return m, nil
+		}
+	}
+
+	switch msg.String() {
+	case "r":
+		if m.cfg.ProxyURL == "" {
+			m.proxyInputMode = true
+			m.proxyInput = ""
+			return m, nil
+		}
+		return m.startRetry(), nil
+	case "s", "esc", "q":
+		m.errors = nil
+		m.page = homePage
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) startRetry() tea.Model {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.page = syncPage
+	m.syncDone = false
+	m.syncTracks = nil
+	m.curTrack = syncTrack{}
+	m.curIndex = 0
+	m.totalTracks = 0
+	m.syncStatus = "Retrying failed tracks through proxy..."
+	m.activePlID = ""
+	m.cancel = cancel
+	m.colorIdx = 0
+	go runRetry(m.cfg, m.errors, ctx, cancel)
+	return m
+}
+
 func (m model) handleTrackUpdate(u sync.TrackUpdate) tea.Model {
 	m.activePlID = u.PlaylistID
 	m.curIndex = u.Current
@@ -324,11 +399,13 @@ func (m model) handleTrackUpdate(u sync.TrackUpdate) tea.Model {
 		m.totalTracks = u.Total
 	}
 	m.curTrack = syncTrack{
-		title:    u.Title,
-		url:      u.URL,
-		status:   u.Status,
-		progress: u.Progress,
-		err:      u.Err,
+		playlistID: u.PlaylistID,
+		trackID:    u.TrackID,
+		title:      u.Title,
+		url:        u.URL,
+		status:     u.Status,
+		progress:   u.Progress,
+		err:        u.Err,
 	}
 
 	m.syncTracks = append(m.syncTracks, m.curTrack)
@@ -371,6 +448,22 @@ func (m model) handleSyncDone(d syncDoneMsg) tea.Model {
 			m.syncStatus = "Complete"
 		}
 	}
+	if len(m.errors) > 0 {
+		m.page = failPage
+		m.proxyInputMode = false
+		m.proxyInput = ""
+		m.retryAdded = 0
+		m.retryErrors = 0
+	}
+	return m
+}
+
+func (m model) handleRetryDone(d retryDoneMsg) tea.Model {
+	m.retryAdded = d.added
+	m.retryErrors = d.errors
+	m.syncDone = true
+	m.page = failPage
+	m.proxyInputMode = false
 	return m
 }
 
@@ -473,17 +566,20 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "down", "j":
-		if m.settingsField < 1 {
+		if m.settingsField < 2 {
 			m.settingsField++
 		}
 		return m, nil
 	case "e":
 		m.settingsEditing = true
 		m.settingsMsg = ""
-		if m.settingsField == 0 {
+		switch m.settingsField {
+		case 0:
 			m.settingsInput = m.cfg.Username
-		} else {
+		case 1:
 			m.settingsInput = m.cfg.MusicDir
+		case 2:
+			m.settingsInput = m.cfg.ProxyURL
 		}
 		return m, nil
 	case "esc", "q":
@@ -495,14 +591,17 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) confirmSettings() (tea.Model, tea.Cmd) {
 	val := strings.TrimSpace(m.settingsInput)
-	if val == "" {
+	if m.settingsField < 2 && val == "" {
 		m.settingsMsg = "value cannot be empty"
 		return m, nil
 	}
-	if m.settingsField == 0 {
+	switch m.settingsField {
+	case 0:
 		m.cfg.Username = val
-	} else {
+	case 1:
 		m.cfg.MusicDir = val
+	case 2:
+		m.cfg.ProxyURL = val
 	}
 	m.cfg.Save()
 	m.settingsEditing = false
@@ -515,7 +614,8 @@ func (m model) settingsView() string {
 	var b strings.Builder
 	b.WriteString("sc-sync — Settings\n\n")
 
-	labels := []string{"SoundCloud username", "Music directory"}
+	labels := []string{"SoundCloud username", "Music directory", "Proxy URL"}
+	vals := []string{m.cfg.Username, m.cfg.MusicDir, m.cfg.ProxyURL}
 
 	if m.settingsEditing {
 		b.WriteString(fmt.Sprintf("Edit %s:\n\n", labels[m.settingsField]))
@@ -525,13 +625,16 @@ func (m model) settingsView() string {
 		}
 		b.WriteString("\n\n[enter] save  [esc] cancel")
 	} else {
-		vals := []string{m.cfg.Username, m.cfg.MusicDir}
 		for i := range labels {
 			cur := "  "
 			if i == m.settingsField {
 				cur = "▸ "
 			}
-			b.WriteString(fmt.Sprintf("%s%s: %s\n", cur, labels[i], vals[i]))
+			display := vals[i]
+			if display == "" {
+				display = "(not set)"
+			}
+			b.WriteString(fmt.Sprintf("%s%s: %s\n", cur, labels[i], display))
 		}
 		if m.settingsMsg != "" {
 			b.WriteString(fmt.Sprintf("\n%s", m.settingsMsg))
@@ -550,6 +653,8 @@ func (m model) View() string {
 		return m.homeView()
 	case syncPage:
 		return m.syncView()
+	case failPage:
+		return m.failView()
 	case addPage:
 		return m.addView()
 	case deletePage:
@@ -717,6 +822,53 @@ func (m model) syncView() string {
 	return b.String()
 }
 
+func (m model) failView() string {
+	var b strings.Builder
+
+	if m.retryAdded > 0 || m.retryErrors > 0 {
+		b.WriteString("sc-sync — Retry complete\n\n")
+		if m.retryAdded > 0 {
+			b.WriteString(fmt.Sprintf("Downloaded: %d\n", m.retryAdded))
+		}
+		if m.retryErrors > 0 {
+			b.WriteString(fmt.Sprintf("Failed: %d\n", m.retryErrors))
+		}
+		b.WriteString("\nPress any key to go back")
+		return b.String()
+	}
+
+	if m.proxyInputMode {
+		b.WriteString("sc-sync — Proxy required\n\n")
+		b.WriteString("Enter proxy URL (e.g. socks5://127.0.0.1:9050):\n\n")
+		b.WriteString("> " + m.proxyInput + "_")
+		b.WriteString("\n\n[enter] save and retry  [esc] cancel")
+		return b.String()
+	}
+
+	b.WriteString("sc-sync — Failed tracks\n\n")
+
+	// table header
+	b.WriteString(fmt.Sprintf("%-3s %-40s %-50s %s\n", " #", "Track", "URL", "Error"))
+	b.WriteString(strings.Repeat("─", 140) + "\n")
+
+	for i, e := range m.errors {
+		num := fmt.Sprintf("%-3d", i+1)
+		name := truncate(trackDisplayName(e.title, e.url, i+1), 38)
+		url := truncate(e.url, 48)
+		errShort := truncate(e.err, 40)
+		b.WriteString(fmt.Sprintf("%s %-40s %-50s %s\n", num, name, url, errShort))
+	}
+
+	b.WriteString(fmt.Sprintf("\n%d failed track(s)\n", len(m.errors)))
+	if m.cfg.ProxyURL == "" {
+		b.WriteString("\n[r] retry with proxy (not set)  [s] skip")
+	} else {
+		b.WriteString("\n[r] retry through proxy  [s] skip")
+	}
+	b.WriteString("  [esc] back")
+	return b.String()
+}
+
 func (m model) addView() string {
 	var b strings.Builder
 	b.WriteString("sc-sync — Add playlist\n\n")
@@ -812,5 +964,90 @@ func runSync(cfg *config.Config, msg startSyncMsg, ctx context.Context, cancel c
 	if program != nil {
 		added, removed, _ := syncer.Stats()
 		program.Send(syncDoneMsg{added: added, removed: removed})
+	}
+}
+
+func runRetry(cfg *config.Config, failed []syncTrack, ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
+
+	database, err := db.Init(cfg.DBPath)
+	if err != nil {
+		if program != nil {
+			program.Send(errMsg{fmt.Errorf("db: %w", err)})
+		}
+		return
+	}
+	defer database.Close()
+
+	syncer := sync.New(cfg, database)
+
+	updates := make(chan sync.TrackUpdate, 200)
+	statusCh := make(chan sync.StatusMsg, 50)
+
+	go func() {
+		for u := range updates {
+			if program != nil {
+				program.Send(u)
+			}
+		}
+	}()
+	go func() {
+		for s := range statusCh {
+			if program != nil {
+				program.Send(s)
+			}
+		}
+	}()
+
+	// group errors by playlistID
+	type group struct {
+		playlist config.Playlist
+		tracks   []sync.RetryTrack
+	}
+	groups := make(map[string]*group)
+	for _, ft := range failed {
+		g, ok := groups[ft.playlistID]
+		if !ok {
+			var pl config.Playlist
+			for _, p := range cfg.Playlists {
+				if p.ID == ft.playlistID {
+					pl = p
+					break
+				}
+			}
+			g = &group{playlist: pl}
+			groups[ft.playlistID] = g
+		}
+		g.tracks = append(g.tracks, sync.RetryTrack{
+			ID:    ft.trackID,
+			Title: ft.title,
+			URL:   ft.url,
+		})
+	}
+
+	totalAdded := 0
+	totalErrors := 0
+	for _, g := range groups {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		if err := syncer.RetryTracks(ctx, g.playlist, g.tracks, cfg.ProxyURL, updates, statusCh); err != nil {
+			log.Printf("retry playlist %q: %v", g.playlist.ID, err)
+		}
+		a, _, e := syncer.Stats()
+		totalAdded = a
+		totalErrors = e
+	}
+
+	close(updates)
+	close(statusCh)
+
+	ext := "." + cfg.AudioFormat
+	if err := playlist.Generate(cfg.MusicDir, ext); err != nil {
+		log.Printf("m3u: %v", err)
+	}
+
+	if program != nil {
+		program.Send(retryDoneMsg{added: totalAdded, errors: totalErrors})
 	}
 }
